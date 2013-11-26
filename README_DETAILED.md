@@ -607,8 +607,34 @@ ___
     * If you want to change the behaviour before the `chroot` is entered or after it is left, you have to implement it in [execute_shell.yaml](src/jenkins_setup/templates/execute_shell.yaml) which includes for each job the *Execute shell* code.
     * If you want to change the behaviour right after the `chroot` is entered, you can do this in the [pbuilder_env.sh script](scripts/pbuilder_env.sh).
     * If you want to change the actual build or test process, change the right script of the [script folder](scripts/).
+### pbuilder tips
+Running a chroot locally for debugging:
+* copy the base targz file you want to use
+```
+cp <<YOUR_BASETGZ>> /tmp/basetgz
+```
+run the chroot environment for 32bit
+```
+setarch i386 sudo pbuilder login --basetgz /tmp/basetgz -- /home/jenkins/jenkins_setup/scripts/pbuilder_env.sh
+```
+run the chroot environment for 64bit
+```
+sudo pbuilder login --basetgz /tmp/basetgz -- /home/jenkins/jenkins_setup/scripts/pbuilder_env.sh
+```
+
+
+## For graphics tests
+Prepare the jenkins node for graphical tests by installing VirtualGL and TurboVNC.
+You can run the following script to prepare the node 
+
+    sudo ~/jenkins-config/jenkins_setup/scripts/graphicTest/prepareNode.bash
+
+After running the above script, the computer must be restarted.
+
+The graphics driver must be an version of the official nvidia driver. Successfully tested were the versions nvidia-current, nvidia-304 and nvidia-304-experimental. Other nvidia drivers are likely to work as well but are not tested yet.
 
 ___
+
 
 > # Manual Pipeline Generation (deprecated):
 >
