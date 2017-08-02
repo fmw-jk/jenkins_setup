@@ -8,8 +8,9 @@ stored or on an GitHub account.
 """
 
 import yaml
-
-from jenkins_setup import common
+import paramiko
+import os
+import sys
 
 
 class CobPipe(object):
@@ -33,6 +34,7 @@ class CobPipe(object):
         @type  pipeline_config: dict
         """
 
+        self.pipeline_config = pipeline_config
         self.user_name = pipeline_config['user_name']
         self.server_name = pipeline_config['server_name']
         self.email = pipeline_config['email']
@@ -42,7 +44,7 @@ class CobPipe(object):
             repo = CobPipeRepo(repo_name, data)
             self.repositories[repo_name] = repo
 
-    def load_config_from_url(self, pipeline_repos_owner, server_name, user_name):
+    def load_config_from_url(self, pipeline_repos_owner, server_name, user_name, url):
         """
         Get the buildpipeline configuration by the given server and user name
         and set up the pipeline object
@@ -55,7 +57,58 @@ class CobPipe(object):
         @type  user_name: str
         """
 
-        pipeline_config = common.get_buildpipeline_configs(server_name, user_name)
+        pipeconfig_url = url.replace(".git", "")
+        pipeconfig_url = pipeconfig_url.replace("https://github.com/", "https://raw.github.com/")
+        pipeconfig_url = pipeconfig_url.replace("git://github.com/", "https://raw.github.com/")
+        pipeconfig_url = pipeconfig_url.replace("git@github.com:", "https://raw.github.com/")
+        pipeconfig_url = pipeconfig_url + "/master/%s/%s/pipeline_config.yaml" % (server_name, user_name)
+        print "Parsing buildpipeline configuration file from github for %s stored at:\n%s" % (user_name, pipeconfig_url)
+        with contextlib.closing(urllib2.urlopen(pipeconfig_url)) as f:
+            pipeline_config = yaml.load(f.read())
+        self.load_config_from_dict(pipeline_config)
+        self.pipeline_repos_owner = pipeline_repos_owner
+
+    def load_config_from_sftp(self, pipeline_repos_owner, server_name, user_name):
+        """
+        Get the buildpipeline configuration by the given server and user name
+        and set up the pipeline object
+
+        @param pipeline_repos_owner: address of config repo
+        @type  pipeline_repos_owner: str
+        @param server_name: name of server
+        @type  server_name: str
+        @param user_name: name of user
+        @type  user_name: str
+        """
+
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(hostname=server_name, username="jenkins", key_filename=os.path.expanduser("~/.ssh/id_rsa"))
+        sftp = client.open_sftp()
+        fileObject = sftp.file("jenkins-config/jenkins_config/" + server_name + "/" + user_name + "/pipeline_config.yaml", 'rb')
+        pipeline_config = yaml.load(fileObject.read())
+        self.load_config_from_dict(pipeline_config)
+        self.pipeline_repos_owner = pipeline_repos_owner
+
+    def load_config_from_file(self, pipeline_repos_owner, server_name, user_name, file_location):
+        """
+        Get the buildpipeline configuration by the given server and user name
+        and set up the pipeline object
+
+        @param pipeline_repos_owner: address of config repo
+        @type  pipeline_repos_owner: str
+        @param server_name: name of server
+        @type  server_name: str
+        @param user_name: name of user
+        @type  user_name: str
+        """
+
+        if file_location == None:
+            file_location = os.environ['WORKSPACE']
+        fileObject = open( file_location + "/jenkins_config/" + server_name + "/" + user_name + "/pipeline_config.yaml", 'rb')
+        pipeline_config = yaml.load(fileObject.read())
+
         self.load_config_from_dict(pipeline_config)
         self.pipeline_repos_owner = pipeline_repos_owner
 
@@ -77,28 +130,85 @@ class CobPipe(object):
 
         return job_type_dict
 
-    def get_custom_dependencies(self, polled_only=False):
+    def split_github_url(self, url):
         """
-        Get all dependencies defined in the pipeline and their corresponding
-        repositories
+        splits a github url into user and repository name
+        
+        :param url: github url
+        """
+        
+        user = url.split(':', 1)[1].split('/', 1)[0]
+        name = url.split(':', 1)[1].split('/', 1)[1].split('.git')[0]
 
-        @param polled_only: if set only polled dependencies will be considered
-        @type  polled_only: bool
+        return user, name
+        
+        
+    def split_hg_url(self, url):
+        """
+        splits a hg url into user and repository name
+        
+        :param url: hg url
+        """
+        # example ssh://user@server://path/repo1 
+        user = url.split('@')[0].split('//')[1]
+        name = url.split('/')[8]
+
+        return user, name
+
+    def create_scm_trigger(self, vcs_type, url, version, jobs_to_trigger = []):
+        """
+        Create a scm trigger with a name and content
+
+        @return type: string
+        @return type: dict
+        """    
+    
+        scm_trigger = {}
+        scm_trigger['url'] = url
+        scm_trigger['vcs_type'] = vcs_type
+        if vcs_type == "git": 
+            user, repo_name = self.split_github_url(scm_trigger['url'])
+        elif vcs_type == "hg":
+            user, repo_name = self.split_hg_url(scm_trigger['url'])
+        else:
+            print "scm type" + vcs_type + "not supported"
+            sys.exit()
+        scm_trigger['user'] = user
+        scm_trigger['repo'] = repo_name
+        scm_trigger['version'] = version
+        scm_trigger['jobs_to_trigger'] = jobs_to_trigger
+        scm_trigger_name = scm_trigger['vcs_type'] + '__' + scm_trigger['user'] + '__' + scm_trigger['repo'] + '__' + scm_trigger['version']
+        return scm_trigger_name, scm_trigger
+
+    def get_scm_triggers(self):
+        """
+        Get all scm triggers with jobs_to_trigger
+
         @return type: dict
         """
 
-        deps = {}
-        for repo in self.repositories.keys():
-            for dep in self.repositories[repo].dependencies.keys():
-                if polled_only:
-                    if not self.repositories[repo].dependencies[dep].poll:
-                        continue
-                if dep in deps:
-                    deps[dep].append(repo)
-                else:
-                    deps[dep] = [repo]
+        pipe_repo_list = self.repositories.keys()
+        scm_triggers = {}
+        for pipe_repo in pipe_repo_list:
+            # always add pipe_repo to scm triggers
+            vcs_type = self.pipeline_config['repositories'][pipe_repo]['type']
+            scm_trigger_name, scm_trigger = self.create_scm_trigger(vcs_type, self.repositories[pipe_repo].data['url'], self.repositories[pipe_repo].data['version'], [pipe_repo])
+            if scm_trigger_name in scm_triggers.keys(): # if dependency is already listed in dependencies: extend the jobs_to_trigger with the current repository
+                scm_triggers[scm_trigger_name]['jobs_to_trigger'].append(pipe_repo)
 
-        return deps
+            else: # if not listed in scm_triggers: add a new entry
+                scm_triggers[scm_trigger_name] = scm_trigger
+
+            # add dependencies to scm triggers if they are marked with poll=true
+            for dependency in self.repositories[pipe_repo].data['dependencies'].keys():
+                if self.repositories[pipe_repo].data['dependencies'][dependency]['poll']:
+                    vcs_type = self.pipeline_config['repositories'][pipe_repo]['type']
+                    scm_trigger_name, scm_trigger = self.create_scm_trigger(vcs_type, self.repositories[pipe_repo].data['dependencies'][dependency]['url'], self.repositories[pipe_repo].data['dependencies'][dependency]['version'], [pipe_repo])
+                    if scm_trigger_name in scm_triggers.keys(): # if dependency is already listed in dependencies: extend the jobs_to_trigger with the current repository
+                        scm_triggers[scm_trigger_name]['jobs_to_trigger'].append(pipe_repo)
+                    else: # if not listed in dependencies: add a new entry
+                        scm_triggers[scm_trigger_name] = scm_trigger
+        return scm_triggers
 
 
 class CobPipeDependencyRepo(object):
@@ -130,7 +240,7 @@ class CobPipeDependencyRepo(object):
 
         self.test = None
         if 'test' in data:
-            self.poll = data['test']
+            self.test = data['test']
 
     def get_rosinstall(self):
         """
@@ -169,6 +279,7 @@ class CobPipeRepo(CobPipeDependencyRepo):
         self.ros_distro = data['ros_distro']
         self.prio_ubuntu_distro = data['prio_ubuntu_distro']
         self.prio_arch = data['prio_arch']
+        self.data = data
 
         self.regular_matrix = {}
         if data['regular_matrix']:

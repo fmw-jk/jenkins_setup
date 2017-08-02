@@ -1,40 +1,33 @@
 #!/bin/bash
-echo "vvvvvvvvvvvvvvvvvvv  pbuilder_env.sh vvvvvvvvvvvvvvvvvvvvvv"
-date
-export WORKSPACE=$1
-echo $WORKSPACE
 
-echo "Set up environment variables"
+export WORKSPACE=$1
+
 . $WORKSPACE/env_vars.sh
-echo "Job-Type: $JOBTYPE"
+
+. /opt/ros/$ROSDISTRO/setup.bash
 
 export PATH=$PATH:/usr/local/bin
-. /opt/ros/$ROSDISTRO/setup.sh
-export ROS_PACKAGE_PATH=/tmp/test_repositories/src_repository:$ROS_PACKAGE_PATH
 export PYTHONPATH=$WORKSPACE/jenkins_setup/src:$PYTHONPATH
 
-
-
-echo "Set up ssh"
 export HOME="/root"
+chmod go-rw $WORKSPACE/.ssh/authorized_keys
+chmod go-rw $WORKSPACE/.ssh/id_rsa
 cp -a $WORKSPACE/.ssh /root &&
-ls -la /root/ &&
 chown -R root.root /root/.ssh
 if [ $? != 0 ]; then
     echo "Could not successfully set up ssh"
     exit 1
 fi
 
-export DIR=$WORKSPACE/jenkins_setup/scripts/graphicTest/chroot
 case $JOBTYPE in
     regular_graphics_test|prio_graphics_test)
-        echo "Set up graphic"
+        echo "Set up graphic" # TODO: this step takes a long time, can we shorten it? Maybe move some parts into the initial generation of the chroot tarballs?
 
+        export DIR=$WORKSPACE/jenkins_setup/scripts/graphicTest/chroot
         $DIR/checkDisplayNull.bash &&
         $DIR/setupSources.bash &&
         $DIR/../tvnc/installTurboVNC.bash &&
         $DIR/../vgl/installVirtualGL.bash &&
-        $DIR/installSimulationPrerequisites.bash &&
         $DIR/distUpgrade.bash &&
         $DIR/installNvidia.bash &&
         $DIR/setupOGRE.bash
@@ -45,44 +38,27 @@ case $JOBTYPE in
 
         $DIR/remoteX.py start
         export DISPLAY=`cat /tmp/vncDisplay`
-        echo "Using Display: $DISPLAY"
+        echo "Using Display $DISPLAY. Start vncviewer to see the X environment: vncviewer $HOSTNAME$DISPLAY"
         ;;
 esac
 
-echo "======================================================"
-echo " Listing environment variables for debugging purposes "
-echo "======================================================"
-env
-
 echo
-echo
-echo "============================================================"
-echo "==== Begin" $SCRIPT "script.    Ignore the output above ===="
-echo "============================================================"
+echo "==============================================="
+echo "==== Begin script. Ignore the output above ===="
+echo "==============================================="
 
-date
-if [ $JOBTYPE == "graphic_test" ] || [ $JOBTYPE == "prio_graphics_test" ]; then
-    graphic_test="true"
-else
-    graphic_test="false"
-fi
-if [ "$BUILD_REPO_ONLY" == true ]; then
-    build_repo_only="true";
-else
-    build_repo_only="false";
-fi
-
-$WORKSPACE/jenkins_setup/scripts/${JOBTYPE}.py $PIPELINE_REPOS_OWNER $JENKINS_MASTER $JENKINS_USER $ROSDISTRO $REPOSITORY $graphic_test $build_repo_only
+nice -n19 ionice -c2 -n7 python $WORKSPACE/jenkins_setup/scripts/${JOBTYPE}.py $PIPELINE_REPOS_OWNER $JENKINS_MASTER $JENKINS_USER $ROSDISTRO $REPOSITORY
 result=$?
 
-if [ ! -z "$DISPLAY" ] && [ "$DISPLAY" != ":0" ]; then
-    $DIR/remoteX.py stop
-fi
+case $JOBTYPE in
+    regular_graphics_test|prio_graphics_test)
+        if [ ! -z "$DISPLAY" ] && [ "$DISPLAY" != ":0" ]; then
+            $DIR/remoteX.py stop
+        fi
+        ;;
+esac
 
-
-
-date
-echo "============================================================"
-echo "==== End" $SCRIPT "script.    Ignore the output below ======"
-echo "============================================================"
+echo "==============================================="
+echo "==== End script. Ignore the output below ======"
+echo "==============================================="
 exit $result

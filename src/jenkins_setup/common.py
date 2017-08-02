@@ -8,10 +8,12 @@ import subprocess
 import sys
 import fnmatch
 import yaml
+import shutil
 #import threading
 import time
 #from Queue import Queue
 #from threading import Thread
+import rosunit.junitxml as junitxml
 
 
 def append_pymodules_if_needed():
@@ -35,6 +37,89 @@ def apt_get_update(sudo=False):
     else:
         call("sudo apt-get update")
 
+def apt_get_check(pkgs, rosdep=None):
+    """
+    Install the corresponding apt packages from a list of ROS repositories.
+
+    @param pkgs: names of ros repositories
+    @type  pkgs: list
+    @param rosdep: rosdep resolver object (default None)
+    @type  rosdep: rosdep.RosDepResolver
+    """
+    import apt
+    
+    apt_cache = apt.Cache()
+    not_installed = []
+
+    if len(pkgs) > 0:
+        if rosdep:
+            pkgs= rosdep.to_aptlist(pkgs)
+        else:
+            pkgs = pkgs
+    
+    for i in pkgs: #better way?
+        pkg = apt_cache[i]
+        if not pkg.is_installed:
+            not_installed.append(i)
+    
+    return not_installed
+
+
+def apt_get_check_also_nonrosdep(pkgs, ros_distro, rosdep=None):
+    """
+    Extend common.apt_get_install by trying to guess Debian package names
+    of packages not included in rosdep
+
+    @param pkgs: names of ros repositories
+    @type  pkgs: list
+    @param ros_distro: name of ros release, e.g. fuerte
+    @type  ros_distro: str
+    @param rosdep: rosdep resolver object (default None)
+    @type  rosdep: rosdep.RosDepResolver
+    """
+    rosdep_pkgs = []
+    aptget_pkgs = []
+    unavailable_pkgs = []
+
+    import apt
+    for pkg in pkgs:
+        if rosdep and rosdep.has_ros(pkg):
+            debian_pkgs = rosdep.to_apt(pkg)
+            rosdep_pkgs.append(pkg)
+        else:
+            debian_pkgs = ['-'.join(['ros', ros_distro, pkg.replace('_', '-')])]
+            aptget_pkgs += debian_pkgs
+        # use python apt module to check if Debian package exists
+        for debian_pkg in debian_pkgs:
+            if debian_pkg not in apt.Cache():
+                unavailable_pkgs.append(debian_pkg)
+
+    print ""
+    print "apt dependencies: ", aptget_pkgs
+    print "ros dependencies: ", rosdep_pkgs
+    print "unavailable dependencies: ", unavailable_pkgs
+    print ""
+
+    missing_apt_packages = []
+
+    if unavailable_pkgs != []:
+        raise BuildException("Some dependencies are not available: %s" % (', '.join(unavailable_pkgs)))
+
+    if rosdep_pkgs != []:
+        try:
+            missing_apt_packages += apt_get_check(rosdep_pkgs, rosdep)
+        except:
+            raise BuildException("Failed to apt-get check rosdep packages")
+
+    if aptget_pkgs != []:
+        try:
+            missing_apt_packages += apt_get_check(aptget_pkgs)
+        except:
+            raise BuildException("Failed to apt-get check ros repositories")
+
+    return missing_apt_packages
+    
+
 
 def apt_get_install(pkgs, rosdep=None, sudo=False):
     """
@@ -47,7 +132,7 @@ def apt_get_install(pkgs, rosdep=None, sudo=False):
     @param sudo: execute command as super-user (default False)
     @type  sudo: bool
     """
-    cmd = "apt-get install --yes "
+    cmd = "apt-get install --yes --force-yes "
     if sudo:
         cmd = "sudo " + cmd
 
@@ -91,55 +176,151 @@ def apt_get_install_also_nonrosdep(pkgs, ros_distro, rosdep=None, sudo=False):
             if debian_pkg not in apt.Cache():
                 unavailable_pkgs.append(debian_pkg)
 
+    print ""
+    print "apt dependencies: ", aptget_pkgs
+    print "ros dependencies: ", rosdep_pkgs
+    print "unavailable dependencies: ", unavailable_pkgs
+    print ""
+
     if unavailable_pkgs != []:
         raise BuildException("Some dependencies are not available: %s" % (', '.join(unavailable_pkgs)))
 
-    if rosdep_pkgs != []:
-        try:
-            apt_get_install(rosdep_pkgs, rosdep, sudo)
-        except:
-            raise BuildException("Failed to apt-get install rosdep packages")
-
     if aptget_pkgs != []:
         try:
+            print "Installing apt dependencies"
             apt_get_install(aptget_pkgs, sudo=sudo)
         except:
-            raise BuildException("Failed to apt-get install ros repositories")
+            raise BuildException("Failed to apt-get install apt dependencies")
+
+    if rosdep_pkgs != []:
+        try:
+            print "Installing ros dependencies"
+            apt_get_install(rosdep_pkgs, rosdep, sudo)
+        except:
+            raise BuildException("Failed to apt-get install ros dependencies")
+
+def clean_and_copy_test_results(input_dir, output_dir, errors=None, prefix='dummy'):
+    """
+    Takes all the xml-formatted Ant JUnit XML test outputs in input_dir and 
+    aggregates them into output_dir. In this process, it strips any characters 
+    that tend to cause Hudson/Jenkins trouble.
+    """
+    
+    if os.path.exists(output_dir):
+        print "deleting old test results directory", output_dir
+        shutil.rmtree(output_dir)
+    print "creating new test results directory", output_dir
+    os.makedirs(output_dir)
+
+    print "Copy all test results to " + output_dir
+    for d in os.listdir(input_dir):
+        test_dir = os.path.join(input_dir, d)
+        if not os.path.isdir(test_dir):
+            continue
+        base_test_name = os.path.basename(test_dir)
+        # for each test result that a package generated, read it, then
+        # rewrite it to our output directory. This will invoke our
+        # cleaning rules on the XML that protect the result from Hudson
+        # issues.
+        for file in os.listdir(test_dir):
+            if file.endswith('.xml'):
+                test_name = base_test_name + '.' + file[:-4]
+            file = os.path.join(test_dir, file)
+            try:
+                result = junitxml.read(file, test_name)
+                output_path = os.path.join(output_dir, "%s.xml"%test_name)
+                with open(output_path, 'w') as f:
+                    print "re-writing", output_path
+                    f.write(result.xml().encode('utf-8'))
+            except Exception as e:
+                print "ignoring [%s]: %s\n"%(file, e)
+                sys.stderr.write("ignoring [%s]: %s\n"%(file, e))
+
+    # create dummy test if no rostest result exists in workspace_test_results_dir
+    generate_dummy_test = False
+    for root, dirnames, filenames in os.walk(output_dir):
+        if len(filenames) == 0:
+            generate_dummy_test = True
+    if generate_dummy_test:
+        print "No test results, so I'll create a dummy test result xml file, with errors %s" % errors
+        with open(os.path.join(output_dir, 'dummy.xml'), 'w') as f:
+            if errors:
+                f.write('<?xml version="1.0" encoding="UTF-8"?><testsuite tests="1" failures="0" time="1" errors="1" name="%s test"> <testcase name="%s rapport" classname="Results" /><testcase classname="%s_class" name="%sFailure"><error type="%sException">%s</error></testcase></testsuite>' % (prefix, prefix, prefix, prefix, prefix, errors))
+            else:
+                f.write('<?xml version="1.0" encoding="UTF-8"?><testsuite tests="1" failures="0" time="1" errors="0" name="dummy test"> <testcase name="dummy rapport" classname="Results" /></testsuite>')
 
 
-def copy_test_results(workspace, buildspace, errors=None, prefix='dummy'):
+def copy_test_results(buildspace_test_results_dir, workspace_test_results_dir, errors=None, prefix='dummy'):
     """
     Copy test results from buildspace into workspace or create dummy.xml.
 
-    @param workspace: path the test results will copied into
-    @type  workspace: str
-    @param buildspace: path where the test results are stored
-    @type  buildspace: str
+    @param workspace_test_results_dir: path the test results will copied into
+    @type  workspace_test_results_dir: str
+    @param buildspace_test_results_dir: path where the test results are stored
+    @type  buildspace_test_results_dir: str
     @param errors: error name in the dummy file (default None)
     @type  errors: str
     @param prefix: prefix in the dummy file (default dummy)
     @type  prefix: str
     """
-    print "Preparing xml test results"
+    #print "Preparing xml test results"
     try:
-        os.makedirs(os.path.join(workspace, 'test_results'))
+        os.makedirs(os.path.join(workspace_test_results_dir))
         print "Created test results directory"
     except:
         pass
-    os.chdir(os.path.join(workspace, 'test_results'))
-    print "Copy all test results"
-    count = 0
-    for root, dirnames, filenames in os.walk(os.path.join(buildspace, 'test_results')):
-        for filename in fnmatch.filter(filenames, '*.xml'):
-            call("cp %s %s/test_results/" % (os.path.join(root, filename), workspace))
-            count += 1
-    if count == 0:
+    os.chdir(workspace_test_results_dir)
+    print "Copy all test results to " + workspace_test_results_dir
+
+    # copy all rostest test reports nested in their packagename's directory
+#    for root, dirnames, filenames in os.walk(buildspace_test_results_dir):
+#        for filename in fnmatch.filter(filenames, '*.xml'):
+#            call("cp %s %s" % (os.path.join(root, filename), workspace_test_results_dir))
+
+    for d in os.listdir(buildspace_test_results_dir):
+        print("looking at", d)
+        test_dir = os.path.join(buildspace_test_results_dir, d)
+        if not os.path.isdir(test_dir):
+            continue
+        base_test_name = os.path.basename(test_dir)
+        # for each test result that a package generated, read it, then
+        # rewrite it to our output directory. This will invoke our
+        # cleaning rules on the XML that protect the result from Hudson
+        # issues.
+##        for file in os.listdir(test_dir):
+##            print 'file', file
+##            if file.endswith('.xml'):
+##                test_name = base_test_name + '.' + file[:-4]
+##                print 'test_name', test_name
+##                shutil.copy(os.path.join(test_dir, file), os.path.join(workspace_test_results_dir, test_name + ".xml"))
+
+    # create dummy test if no rostest result exists in workspace_test_results_dir
+    generate_dummy_test = False
+    for root, dirnames, filenames in os.walk(workspace_test_results_dir):
+        if len(filenames) == 0:
+            generate_dummy_test = True
+    if generate_dummy_test:
         print "No test results, so I'll create a dummy test result xml file, with errors %s" % errors
-        with open(os.path.join(workspace, 'test_results/dummy.xml'), 'w') as f:
+        with open(os.path.join(workspace_test_results_dir, 'dummy.xml'), 'w') as f:
             if errors:
                 f.write('<?xml version="1.0" encoding="UTF-8"?><testsuite tests="1" failures="0" time="1" errors="1" name="%s test"> <testcase name="%s rapport" classname="Results" /><testcase classname="%s_class" name="%sFailure"><error type="%sException">%s</error></testcase></testsuite>' % (prefix, prefix, prefix, prefix, prefix, errors))
             else:
                 f.write('<?xml version="1.0" encoding="UTF-8"?><testsuite tests="1" failures="0" time="1" errors="0" name="dummy test"> <testcase name="dummy rapport" classname="Results" /></testsuite>')
+
+
+def copy_static_analysis_results(buildspace_test_results_dir, workspace_test_results_dir):
+    """
+    Copy static analysis results from buildspace into workspace.
+
+    @param buildspace_test_results_dir: path where the test results are stored
+    @type  buildspace_test_results_dir: str
+    @param workspace_test_results_dir: path the test results will copied into
+    @type  workspace_test_results_dir: str
+    """
+    # Copy all static analysis results (all xml files)
+    for root, dirnames, filenames in os.walk(os.path.join(buildspace_test_results_dir)):
+        for filename in fnmatch.filter(filenames, '*.xml'):
+            call("cp %s %s/" % (os.path.join(root, filename), workspace_test_results_dir))
 
 
 def get_ros_env(setup_file):
@@ -184,25 +365,25 @@ def call_with_list(command, envir=None, verbose=True):
     """
     print "Executing command '%s'" % ' '.join(command)
     helper = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, env=envir)
-    res = ""
-    while helper.poll() is None:
-        command_output = helper.stdout.readline()
-        res += command_output
-        if verbose:
-            sys.stdout.write(command_output)
-        time.sleep(0.1)  # TODO What is a good value here? Without this delay it's busy looping
-
-    #make sure to capture the last line(s)
-    command_output = helper.stdout.read()
-    res += command_output
     if verbose:
-        print command_output
+        for line in iter(helper.stdout.readline, b''):
+            print line,
 
+    out, err = helper.communicate()
     if helper.returncode != 0:
         msg = "Failed to execute command '%s'" % command
         print r"/!\  %s" % msg
+        print out, err
         raise BuildException(msg)
-    return res
+
+    # print output if verbose
+    if verbose:
+        print out
+    
+    # print error always
+    print err
+    
+    return out, err
 
 
 def call(command, envir=None, verbose=True):
@@ -440,51 +621,6 @@ def get_dependencies(source_folder, build_depends=True, test_depends=True):
                     depends.append(dep.name)
 
     return depends
-
-
-def get_buildpipeline_configs(server_name, user_name, config_repo=None):
-    """
-    Get buildpipeline configuration
-
-    :param server_name: name of Jenkins master, ``str``
-    :param user_name: name of user, ``str``
-    :param config_repo: address of configs repository (optional), ``st``
-
-    :returns: return :dict: with configurations
-    :raises: :exec:`Exception`
-    """
-    if config_repo:
-        try:
-            pipeconfig_url = config_repo.replace(".git", "")
-            pipeconfig_url = pipeconfig_url.replace("https://github.com/", "https://raw.github.com/")
-            pipeconfig_url = pipeconfig_url.replace("git://github.com/", "https://raw.github.com/")
-            pipeconfig_url = pipeconfig_url.replace("git@github.com:", "https://raw.github.com/")
-            pipeconfig_url = pipeconfig_url + "/master/%s/%s/pipeline_config.yaml" % (server_name, user_name)
-            print "Parsing buildpipeline configuration file for %s stored at:\n%s" % (user_name, pipeconfig_url)
-
-            with contextlib.closing(urllib2.urlopen(pipeconfig_url)) as f:
-                bpl_configs = yaml.load(f.read())
-        except Exception as ex:
-            print "While downloading and parsing the buildpipeline configuration \
-                   file from\n%s\nthe following error occured:\n%s" % (pipeconfig_url, ex)
-            raise ex
-
-    else:
-        print "Parsing buildpipeline configuration file for %s stored at:\n%s" % (user_name, server_name)
-        try:
-            client = paramiko.SSHClient()
-            client.load_system_host_keys()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(hostname=server_name, username="jenkins", key_filename=os.path.expanduser("~/.ssh/id_rsa"))
-            sftp = client.open_sftp()
-            fileObject = sftp.file("jenkins-config/jenkins_config/" + server_name + "/" + user_name + "/pipeline_config.yaml", 'rb')
-            bpl_configs = yaml.load(fileObject.read())
-        except Exception as ex:
-            print "While downloading and parsing the buildpipeline configuration \
-                file from\n%s\nthe following error occured:\n%s" % (server_name, ex)
-            raise ex
-
-    return bpl_configs
 
 
 class BuildException(Exception):

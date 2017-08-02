@@ -20,13 +20,13 @@ assumptions:
 ### Debian packages for Ubuntu
 Install basic packages
 
-    sudo apt-get install git-core pbuilder devscripts pigz python-jenkins python-mock python-nose
+    sudo apt-get install git-core pbuilder devscripts pigz python-jenkins python-mock python-nose python-paramiko vim openssh-server
 
 Install basic ROS packages
 
     sudo sh -c 'echo "deb http://packages.ros.org/ros/ubuntu precise main" > /etc/apt/sources.list.d/ros-latest.list'
     wget http://packages.ros.org/ros.key -O - | sudo apt-key add -
-    sudo apt-get update && sudo apt-get install ros-groovy-ros
+    sudo apt-get update && sudo apt-get install ros-hydro-ros
 
 
 Add the jenkins debian repository and install jenkins
@@ -39,12 +39,12 @@ Install `apt-cacher`
 
     sudo apt-get install apt-cacher-ng
 
-### Up or downgrade jenkins to version v1.514
-We've tested the setup on Jenkins version v1.514. You can find the war file [here](http://mirrors.jenkins-ci.org/war).
+### Up or downgrade jenkins to version v1.544
+We've tested the setup on Jenkins version v1.544. You can find the war file [here](http://mirrors.jenkins-ci.org/war).
 
     cd /usr/share/jenkins/
     sudo rm -rf jenkins.war
-    sudo wget http://mirrors.jenkins-ci.org/war/1.514/jenkins.war
+    sudo wget http://mirrors.jenkins-ci.org/war/1.544/jenkins.war
 
 restart jenkins
 
@@ -52,52 +52,6 @@ restart jenkins
 
 
 After a successful installation you can access the jenkins server in your browser at [http://localhost:8080](http://localhost:8080).
-
-
-## Jenkins configuration
-
-### Global security
-Go to [http://localhost:8080/configureSecurity](http://localhost:8080/configureSecurity)
-
-- Check *enable security*
-- Check *Jenkins's own user database* under *Access Control*/*Security Realm*. And check **Allow users to sign up**.
-- Set *Authorization* to **Project-based Matrix Authorization Strategy**.
-- Add an `admin`-user and give him all rights.
-- Add an `anonymous`-group and an `authenticated`-group and give them rights according to the screentshot.
-
-After click save the Server will throw you to a Login screen. Just register with the username `admin`.
-
-![Project-based Matrix Authorization Strategy](pictures/authentication.png "Example for Project-based Matrix Authorization Strategy")
-
-> There are two [more *Security Realm* setups](README_DETAILED.md#security-realm) descriped in the [detailed Jenkins Guide](README_DETAILED.md).
-
-### Basic configuration
-Go to [http://localhost:8080/configure](http://localhost:8080/configure)
-
-- Set *# of executors* to `1`.
-
-##### Jenkins Location
-- Set *Jenkins URL* to your servers name.
-- Set your *System Admin e-mail address*.
-
-##### E-mail Notification
-- Set *SMTP server*
-
-You can keep the default values for all other entries.
-
-### Master node configuration
-Go to [http://localhost:8080/computer/(master)/configure](http://localhost:8080/computer/%28master%29/configure) and add `prio_build regular_build update_tarballs prio_nongraphics_test regular_nongraphics_test` to *Labels*
-
-### Jenkins plugin installation
-Go to [http://localhost:8080/pluginManager/available](http://localhost:8080/pluginManager/available) and install the following plugins:
-
-- [Git Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Git+Plugin)
-- [Parameterized Trigger Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Parameterized+Trigger+Plugin)
-- [Build Pipeline Plugin](http://code.google.com/p/build-pipeline-plugin/)
-- [Mailer](https://wiki.jenkins-ci.org/display/JENKINS/Mailer)
-- [View Job Filters](https://wiki.jenkins-ci.org/display/JENKINS/View+Job+Filters)
-- [Build-timeout Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Build-timeout+Plugin)
-- [Warnings Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Warnings+Plugin)
 
 ### Install `jenkins_setup`, `jenkins_config` and the *cob-pipeline* plugin
 Download the *.hpi* file from [https://github.com/ipa320/cob-pipeline-plugin/tree/master/releases](https://github.com/ipa320/cob-pipeline-plugin/tree/master/releases) ([latest](https://github.com/ipa320/cob-pipeline-plugin/raw/master/releases/v0.9.6/cob-pipeline.hpi)) and place it in `/var/lib/jenkins/plugins`.
@@ -109,10 +63,10 @@ All scripts and configurations will be stored in `/home/jenkins/jenkins-config`.
 
     mkdir ~/jenkins-config
 
-All tarballs will be stored in ~/chroot_tarballs (adapt the *JENKINS_MASTER_NAME*)
+All tarballs will be stored in ~/chroot_tarballs
 
     mkdir -p ~/chroot_tarballs
-    mkdir -p ~/chroot_tarballs/in_use_on__<JENKINS_MASTER_NAME>
+    mkdir -p ~/chroot_tarballs/in_use
 
 Setup ssh configuration (create ssh-key if it doesn't exist already and add github.com and localhost to known hosts)
 
@@ -132,27 +86,96 @@ Setup git configuration on master
 
 Clone the `jenkins_setup` and `jenkins_config` repositories
 
-    git clone git@github.com:ipa320/jenkins_config.git ~/jenkins-config/jenkins_config
+    git clone git@github.com:ipa320/jenkins_config_example.git ~/jenkins-config/jenkins_config
     git clone git@github.com:ipa320/jenkins_setup.git ~/jenkins-config/jenkins_setup
 
 Add the `jenkins_setup` module to the `$PYTHONPATH` (adapt the *ROS_RELEASE*).
 
     sudo su -c 'echo "export PYTHONPATH=~/jenkins-config/jenkins_setup/src" > /etc/profile.d/python_path.sh'
-    sudo su -c 'echo "source /opt/ros/groovy/setup.sh" >> /etc/profile.d/python_path.sh'
+    sudo su -c 'echo "source /opt/ros/hydro/setup.sh" >> /etc/profile.d/python_path.sh'
+
+Create softlinks in userContent directory pointing to `jenkins_setup`, `jenkins_config`, `chroot_tarballs` and `.ssh`
+
+    ln -s ~/jenkins-config/jenkins_setup /var/lib/jenkins/userContent/jenkins_setup
+    ln -s ~/jenkins-config/jenkins_config /var/lib/jenkins/userContent/jenkins_config
+    ln -s ~/chroot_tarballs /var/lib/jenkins/userContent/chroot_tarballs
+    ln -s ~/.ssh /var/lib/jenkins/userContent/.ssh
 
 Enable passwordless sudo rights for the jenkins user by adding the following line at the end of `/etc/sudoers` (open with `sudo visudo -f /etc/sudoers`).
 
     jenkins    ALL=(ALL) NOPASSWD: ALL
 
-Enable password-less ssh login from master to slave and slave to master.
+Enable password-less ssh login from master to slave and slave to master (even if your're using locahost).
 
-    ssh-copy-id <master>    # _on slave_
-    ssh <master>            # _on slave_
-    ssh-copy-id <slave>     # _on master_
+    ssh-copy-id localhost
+    ssh localhost
+    ssh <JENKINS_MASTER_NAME>
 
-Afterwards reboot the Jenkins-Server
+Afterwards reboot your machine
 
     sudo reboot now
+
+## Jenkins configuration
+
+### Global security
+Go to [http://localhost:8080/configureSecurity](http://localhost:8080/configureSecurity)
+
+- Check *enable security*
+- Check *Jenkins's own user database* under *Access Control*/*Security Realm*. And check **Allow users to sign up**.
+- Set *Authorization* to **Project-based Matrix Authorization Strategy**.
+- Add an `admin`-user and give him all rights.
+- Add an `anonymous`-group and an `authenticated`-group and give them rights according to the screentshot.
+
+After click save the Server will throw you to a Login screen. Just register with the username `admin`.
+
+![Project-based Matrix Authorization Strategy](pictures/authentication.png "Example for Project-based Matrix Authorization Strategy")
+
+> * **Github Authentication Plugin**<br/>
+>   Another way is to use the GitHub user database for user identification.
+>   The [Github OAuth Plugin](#install-required-jenkins-plugins) has to be installed.
+>   Configure the plugin as described
+>   [here](https://wiki.jenkins-ci.org/display/JENKINS/Github+OAuth+Plugin) for an 'omnipotent' GitHub user.
+
+### Basic configuration
+Go to [http://localhost:8080/configure](http://localhost:8080/configure)
+
+- Set *# of executors* to `1`.
+
+##### Jenkins Location
+- Set *Jenkins URL* to your servers name.
+- Set your *System Admin e-mail address*.
+
+> ##### E-mail Notification (optional)
+> - Set *SMTP server*
+
+You can keep the default values for all other entries.
+
+### Master and slave node configuration
+Go to [http://localhost:8080/computer](http://localhost:8080/computer) and add new slave called `master-build`.
+- Use `/home/jenkins` as Remote FS root.
+- Enter the labels `update_tarballs prio_build regular_build prio_nongraphics_test regular_nongraphics_test`. 
+- Add `localhost` as Host.
+- Add Credentials 
+  - Set *Kind* to **SSH Username with private key**
+  - Set *Scope* to **System**
+  - Set *Username* to **jenkins** 
+  - Check **From the Jenkins master ~/.ssh** under *Private Key*
+
+
+### Jenkins plugin installation
+Go to [http://localhost:8080/pluginManager/available](http://localhost:8080/pluginManager/available) and install the following plugins:
+
+- [Git Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Git+Plugin)
+- [Parameterized Trigger Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Parameterized+Trigger+Plugin)
+- [Build Pipeline Plugin](http://code.google.com/p/build-pipeline-plugin/)
+- [View Job Filters](https://wiki.jenkins-ci.org/display/JENKINS/View+Job+Filters)
+- [Build-timeout Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Build-timeout+Plugin)
+- [Warnings Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Warnings+Plugin)
+- [Cppcheck Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Cppcheck+Plugin)
+- [Multiple SCMs Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Multiple+SCMs+Plugin)
+- [Copy To Slave Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Copy+To+Slave+Plugin)
+- [Workspace Cleanup Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Workspace+Cleanup+Plugin)
+- [Build Blocker Plugin](https://wiki.jenkins-ci.org/display/JENKINS/Build+Blocker+Plugin)
 
 #### Performance improvements (optional)
 Using RAM for chroot environment and parallel compression.
@@ -197,6 +220,9 @@ Afterwards reboot the Jenkins-Server
 Go to the *cob pipeline configuration* section at [http://localhost:8080/configure](http://localhost:8080/configure) and fill the following fields (As soon as you fill out the fields, the values will be validated in the background.):
 
 - Jenkins Admin Login/Password (This is the user you configured before in the Configure Security part with all the permissions. Enter its login name and password.)
+ 
+> - in case of using github oauth plugin: copy the API Token from [http://localhost:8080/me/configure](http://localhost:8080/me/configure).
+
 - Configuration Folder (Enter the path of the cob-pipeline configuration folder.)
 
     ```
@@ -239,7 +265,9 @@ To set up the necessary chroot tarballs and keep them up-to-date an additional j
     sudo cp ~/jenkins-config/jenkins_setup/templates/update_chroot_tarballs/UPDATE_CHROOT_TARBALLS_config.xml /var/lib/jenkins/jobs/update_chroot_tarballs/config.xml
     sudo chown -R jenkins:jenkins /var/lib/jenkins/jobs/update_chroot_tarballs
 
-Open `/var/lib/jenkins/jobs/update_chroot_tarballs/config.xml` and adjust it to your demands. Especially the `apt-cacher` address.
+Open `/var/lib/jenkins/jobs/update_chroot_tarballs/config.xml` and adjust it to your demands:
+* set the `SERVERNAME` to your Jenkins server (e.g. localhost)
+* set the `APT_CACHER_ADDRESS` to your apt-cacher (e.g. http://localhost:3142)
 
 Afterwards **Reload Configuration from Disk** under [http://localhost:8080/manage](http://localhost:8080/manage) and run the job to create the tarballs.
 
@@ -252,20 +280,38 @@ To update all pipelines (e.g. after a general configuration change) an additiona
 
 Afterwards **Reload Configuration from Disk** under [http://localhost:8080/manage](http://localhost:8080/manage) and run the job to create the tarballs. you will have to start this job manually and give it the admin user and password (if using github OAuth, the use the token from [http://localhost:8080/me/configure](http://localhost:8080/me/configure) when logged in as the admin user.
 
+### configure cleanup_slaves job
+To cleanup the workspaces of all slaves an additional job is needed. Copy the prepared job `config.xml` into the job folder and make the jenkins user own it.
+
+    sudo mkdir /var/lib/jenkins/jobs/update_cleanup_slaves
+    sudo cp ~/jenkins-config/jenkins_setup/templates/update_cleanup_slaves/UPDATE_CLEANUP_SLAVES_config.xml /var/lib/jenkins/jobs/update_cleanup_slaves/config.xml
+    sudo chown -R jenkins:jenkins /var/lib/jenkins/jobs/update_cleanup_slaves
+
 ### configure default view
 Login as `admin` and create a new view by pressing the '+'.
 
 ![Create View](pictures/new_view.png "Create a new view in Jenkins")
 
-Name it 'current\_user' and select **List View**. **Add Job Filter** in the *Job Filter* section and select **User Permissions for Jobs**. Configure as shown in the picture and press OK.
+Name it `current_user` and select **List View**. **Add Job Filter** in the *Job Filter* section and select **User Permissions for Jobs**. Configure as shown in the picture and press OK.
 
 ![Job Filter configuration](pictures/job_filter.png "Configuration example for View Job Filter")
 
 Go to [http://localhost:8080/configure](http://localhost:8080/configure) and select 'current\_user' as **Default view**.
 
-### configure mailer
-Copy the jelly template for the email generation:
+> ### configure mailer (optional)
+> Copy the jelly template for the email generation:
+> 
+>     sudo mkdir /var/lib/jenkins/email-templates
+>     sudo cp ~/jenkins-config/jenkins_setup/templates/email-templates/html-with-health-builds-tests.jelly /var/lib/jenkins/email-templates/
+>     sudo chown -R jenkins:jenkins /var/lib/jenkins/email-templates
 
-    sudo mkdir /var/lib/jenkins/email-templates
-    sudo cp ~/jenkins-config/jenkins_setup/templates/email-templates/html-with-health-builds-tests.jelly /var/lib/jenkins/email-templates/
-    sudo chown -R jenkins:jenkins /var/lib/jenkins/email-templates
+
+## For graphics tests
+Prepare the jenkins node for graphical tests by installing VirtualGL and TurboVNC.
+You can run the following script to prepare the node 
+
+    sudo ~/jenkins-config/jenkins_setup/scripts/graphicTest/prepareNode.bash
+
+After running the above script, the computer must be restarted.
+
+The graphics driver must be an version of the official nvidia driver. Successfully tested were the versions nvidia-current, nvidia-304 and nvidia-304-experimental. Other nvidia drivers are likely to work as well but are not tested yet.
